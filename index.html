@@ -17761,5 +17761,167 @@ function descargarFormatoNomina(){
 })();
 </script>
 
+
+
+<script>
+/* v23.3 — Clasificador S21 detallado y separación real PMG / Desempeño Colectivo.
+   Corrección solicitada:
+   1) DETALLE_CLASIFICADOR deja de exportar sólo TOTAL_S21_REFERENCIAL.
+   2) PMG y DESEMPENO_COLECTIVO ya no duplican el mismo valor.
+   3) La mensualización mantiene peaks en marzo, junio, septiembre y diciembre.
+   4) Se agrega trazabilidad presupuestaria para 21.01/21.02.003.001 y 21.01/21.02.003.002.
+   Sin tocar CSS, interfaz, IDs, listeners ni PDF. */
+(function(){
+  'use strict';
+  if (window.__MBN_V233_CLASIFICADOR_PMG_DC_DETALLADO__) return;
+  window.__MBN_V233_CLASIFICADOR_PMG_DC_DETALLADO__ = true;
+
+  const MESES = ['ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO','JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE'];
+  const PMG_MESES = [3,6,9,12];
+  const PROG = {'01':'Subsecretaría','02':'Regularización de la Propiedad Raíz','03':'Administración de Bienes','04':'Catastro'};
+  const PCT_PMG_INSTITUCIONAL = 22.6; // 15% componente base + 7,6% desempeño institucional.
+
+  function strip(v){ return String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+  function key(v){ return strip(v).toUpperCase().replace(/[^A-Z0-9]+/g,'_').replace(/^_+|_+$/g,''); }
+  function norm(v){ return strip(v).trim().toLowerCase(); }
+  function num(v, def=0){
+    if (v === null || v === undefined || String(v).trim()==='') return def;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    let s=String(v).trim().replace(/\$/g,'').replace(/\s+/g,'').replace('%','');
+    if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) s=s.replace(/\./g,'').replace(',','.');
+    else if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s=s.replace(/,/g,'');
+    else s=s.replace(',','.');
+    const n=Number(s.replace(/[^0-9.\-]/g,''));
+    return Number.isFinite(n)?n:def;
+  }
+  function round(v){ return Math.round(num(v,0)); }
+  function get(o, aliases, def=''){
+    const wanted=aliases.map(key);
+    for (const [k,v] of Object.entries(o||{})) if (wanted.includes(key(k))) return v;
+    return def;
+  }
+  function field(o,names,def=0){
+    for (const n of names){ if(o && o[n]!==undefined && o[n]!==null && o[n]!=='' ) return o[n]; }
+    return def;
+  }
+  function clean(o){ const r={}; Object.entries(o||{}).forEach(([k,v])=>{ if(!String(k).startsWith('__')) r[key(k)] = v; }); return r; }
+  function anioBase(){
+    for(const id of ['projAnioBase','bulkHorizonte','anioCalculo']){ const n=Number(document.getElementById(id)?.value); if(Number.isFinite(n)&&n>1900) return n; }
+    return 2027;
+  }
+  function fuenteRows(){
+    if(Array.isArray(window.__bulkNominaFuenteV352) && window.__bulkNominaFuenteV352.length) return window.__bulkNominaFuenteV352;
+    if(Array.isArray(window.__bulkNominaFuente) && window.__bulkNominaFuente.length) return window.__bulkNominaFuente;
+    if(Array.isArray(window.__bulkNomina) && window.__bulkNomina.length) return window.__bulkNomina;
+    return [];
+  }
+  function codProg(row){
+    const raw=get(row,['CODIGO_PROGRAMA','CODIGO PROGRAMA','PROGRAMA','NOMBRE_PROGRAMA','PROGRAMA_PRESUPUESTARIO'], row?.programa || '01');
+    const s=String(raw||'').trim();
+    const m=s.match(/(?:^|\D)(0?[1-4])(?:\D|$)/); if(m) return String(m[1]).padStart(2,'0');
+    const n=key(s); if(n.includes('REGULARIZACION')) return '02'; if(n.includes('ADMINISTRACION')) return '03'; if(n.includes('CATASTRO')) return '04'; return '01';
+  }
+  function nombreProg(c){ return PROG[String(c).padStart(2,'0')] || ''; }
+  function esAutoridad(row){ const t=norm([row?.REGIMEN_REMUNERACIONAL,row?.CALIDAD_JURIDICA,row?.ESTAMENTO,row?.GRADO,row?.CARGO,row?.ORIGEN_CALCULO,row?.codigoAutoridadRes5,row?.nombreAutoridadRes5].join(' ')); return t.includes('autoridad')||t.includes('res 5')||t.includes('38 bis')||t.includes('seremi')||t.includes('ministro')||t.includes('subsecretario'); }
+  function esHonorario(row){ return norm([row?.REGIMEN_REMUNERACIONAL,row?.CALIDAD_JURIDICA,row?.ESTAMENTO,row?.calidad,row?.['calidad jurídica']].join(' ')).includes('honor'); }
+  function itemS21(row){ const c=norm([row?.CALIDAD_JURIDICA,row?.calidadJuridica,row?.['calidad jurídica'],row?.CALIDAD,row?.ESTAMENTO,row?.estamento].join(' ')); if(c.includes('honor')) return '03'; if(c.includes('contrata')) return '02'; return '01'; }
+  function nombreItemS21(item){ return item==='01'?'Personal de planta':(item==='02'?'Personal a contrata':(item==='03'?'Otras remuneraciones / honorarios':'Personal')); }
+  function pctFlexible(v, defPct=8){ let n=num(v, NaN); if(!Number.isFinite(n)) return defPct; if(n>0 && n<1) n=n*100; return n; }
+  function pctDC(row,res){
+    const v = field(res,['pctDC','PCTDC','tasaDC','TASA_DC'], get(row,['PCTDC','DESEMPENO_COLECTIVO','DESEMPEÑO COLECTIVO','DC','Desempeño colectivo %','Desempeno colectivo %','TASA DC','tasa desempeño colectivo'], document.getElementById('pctDC')?.value || 8));
+    return Math.max(0, pctFlexible(v, 8));
+  }
+  function splitDesempeno(res,row,aut,hon){
+    if(aut || hon) return {PMG:0, DESEMPENO_COLECTIVO:0, PMG_BASE_15:0, INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6:0, TASA_DESEMPENO_COLECTIVO_PCT:0, PMG_TOTAL_MODERNIZACION:0, TRAZABILIDAD:'NO_APLICA_AUTORIDAD_HONORARIOS'};
+    const explicitPMG = field(res,['PMG_INSTITUCIONAL','PMG_LEY_19553','desempenoInstitucional'], null);
+    const explicitDC = field(res,['DESEMPENO_COLECTIVO_MONTO','desempenoColectivoMonto','desempenoColectivo'], null);
+    if(explicitPMG !== null && explicitDC !== null && round(explicitPMG) !== round(explicitDC)){
+      const pmg=round(explicitPMG), dc=round(explicitDC), total=pmg+dc;
+      return {PMG:pmg, DESEMPENO_COLECTIVO:dc, PMG_BASE_15:Math.round(pmg*15/PCT_PMG_INSTITUCIONAL), INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6:pmg-Math.round(pmg*15/PCT_PMG_INSTITUCIONAL), TASA_DESEMPENO_COLECTIVO_PCT:pctDC(row,res), PMG_TOTAL_MODERNIZACION:total, TRAZABILIDAD:'CAMPOS_EXPLICITOS_MOTOR'};
+    }
+    const totalMod = round(field(res,['PMG_TOTAL_MODERNIZACION','modernizacionPMG','PMG_MODERNIZACION','PMG','moder','modernizacion'],0));
+    if(totalMod <= 0) return {PMG:0, DESEMPENO_COLECTIVO:0, PMG_BASE_15:0, INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6:0, TASA_DESEMPENO_COLECTIVO_PCT:pctDC(row,res), PMG_TOTAL_MODERNIZACION:0, TRAZABILIDAD:'SIN_MODERNIZACION'};
+    const dcPct = pctDC(row,res);
+    const denom = PCT_PMG_INSTITUCIONAL + dcPct;
+    let pmg = denom > 0 ? Math.round(totalMod * PCT_PMG_INSTITUCIONAL / denom) : totalMod;
+    let dc = totalMod - pmg;
+    const pmgBase15 = Math.round(pmg * 15 / PCT_PMG_INSTITUCIONAL);
+    return {PMG:pmg, DESEMPENO_COLECTIVO:dc, PMG_BASE_15:pmgBase15, INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6:pmg-pmgBase15, TASA_DESEMPENO_COLECTIVO_PCT:dcPct, PMG_TOTAL_MODERNIZACION:totalMod, TRAZABILIDAD:'PRORRATEO_LEY_19553_22_6_Y_DC_'+dcPct};
+  }
+  function distribuir(total, meses){ total=round(total); const out={}; if(!meses.length) return out; const base=Math.trunc(total/meses.length); let acum=0; meses.forEach((m,i)=>{ out[m]=(i===meses.length-1)?total-acum:base; acum+=out[m]; }); return out; }
+  function pctInput(id){ const raw=String(document.getElementById(id)?.value??'').trim(); if(!raw) return null; const n=num(raw, NaN); return Number.isFinite(n)&&n!==0?n:null; }
+  function reajusteProyPorAnio(anio){ const base=anioBase(); const idx=Number(anio)-base+1; let p=null; if(idx>=1 && idx<=5) p=pctInput('projReaj'+idx); if(p===null) p=pctInput('bulkReajusteSP'); return p===null?0:p; }
+  function cloneForYear(row, anio, reajAcum){
+    let c; if(typeof window.clonarFilaParaProyeccion==='function'){ try{ c=window.clonarFilaParaProyeccion(row, anio, reajAcum); }catch(e){} }
+    if(!c) c={...(row||{})};
+    c.__proyeccionAnio=anio; c.__reajusteAcumuladoPct=reajAcum;
+    c.FECHA_INICIO_PERIODO='01-01-'+anio; c['fecha inicio período']='01-01-'+anio; c['fecha inicio periodo']='01-01-'+anio;
+    c.FECHA_TERMINO='31-12-'+anio; c['fecha término']='31-12-'+anio; c['fecha termino']='31-12-'+anio;
+    return c;
+  }
+  function annualRow(res, raw, idx, anio, origen, reajAcum){
+    const cod=codProg(res)||codProg(raw); const aut=!!(res.autoridadRes5)||esAutoridad(res)||esAutoridad(raw); const hon=esHonorario(res)||esHonorario(raw);
+    const split=splitDesempeno(res,raw,aut,hon);
+    const cf=round(field(res,['COSTO_FUNCIONARIO','totalFuncionario','resultado','TOTAL_HABERES'],0));
+    const cm=round(field(res,['COSTO_MINISTERIO','costoMinisterio'],0));
+    const cmg=round(field(res,['COSTO_MINISTERIO_CON_GLOSAS','costoMinisterioConGlosas','costoMinisterioConGlosa'],cm));
+    return {ANIO:anio,FILA_ORIGEN:raw.__filaExcel||raw.__filaCarga||idx+1,ORIGEN:origen,RUT:get(raw,['RUT','RUN','RUT_SOLO_NUMEROS'],''),NOMBRE:get(raw,['NOMBRE','NOMBRE_COMPLETO'],''),CODIGO_PROGRAMA:cod,NOMBRE_PROGRAMA:nombreProg(cod),CALIDAD_JURIDICA:res.calidadJuridica||get(raw,['CALIDAD_JURIDICA','CALIDAD JURIDICA','CALIDAD'],''),ESTAMENTO:res.estamento||get(raw,['ESTAMENTO','TIPO_CARGO','TIPO DE CARGO'],''),GRADO:res.grado||get(raw,['GRADO','GRADO_EUS','GRADO EUS'],''),CARGO:res.cargo||get(raw,['CARGO','CARGO_AUTORIDAD'],''),REGIMEN_REMUNERACIONAL:aut?'AUTORIDAD_ART_38_BIS_RES_5':(hon?'HONORARIOS_HSA':'ESCALA_UNICA_SUELDOS'),
+      SUELDO_BASE:round(field(res,['SUELDO_BASE','sueldoBase'],0)),BASE_AUTORIDAD_RES5:round(field(res,['BASE_AUTORIDAD_RES5','baseAutoridadRes5'],0)),ADICIONAL_AUTORIDAD_RES5:round(field(res,['ADICIONAL_AUTORIDAD_RES5','adicionalAutoridadRes5'],0)),ASIGNACION_PROFESIONAL:round(field(res,['ASIGNACION_PROFESIONAL','asigProfesional'],0)),ASIGNACION_TITULO:round(field(res,['ASIGNACION_TITULO','asigSustitutiva'],0)),ASIGNACION_ZONA:round(field(res,['ASIGNACION_ZONA','asigZona'],0)),ZONA_EXTREMA:round(field(res,['ZONA_EXTREMA','zonaExtrema'],0)),BIENIOS:round(field(res,['BIENIOS','bienios'],0)),BIENIOS_PROYECTADOS:round(field(res,['BIENIOS_PROYECTADOS','bieniosProyectados'],0)),ASIGNACION_RESPONSABILIDAD:round(field(res,['ASIGNACION_RESPONSABILIDAD','asigResponsabilidad'],0)),
+      PMG:split.PMG,PMG_BASE_15:split.PMG_BASE_15,INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6:split.INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6,DESEMPENO_COLECTIVO:split.DESEMPENO_COLECTIVO,PMG_TOTAL_MODERNIZACION:split.PMG_TOTAL_MODERNIZACION,TASA_DESEMPENO_COLECTIVO_PCT:split.TASA_DESEMPENO_COLECTIVO_PCT,TRAZABILIDAD_SEPARACION_PMG_DC:split.TRAZABILIDAD,
+      BIENESTAR_INSTITUCIONAL:round(field(res,['BIENESTAR_INSTITUCIONAL','bienestar'],0)),BONO_ESCOLARIDAD:round(field(res,['BONO_ESCOLARIDAD','bonoEscolar'],0)),BONO_ESCOLARIDAD_ADICIONAL:round(field(res,['BONO_ESCOLARIDAD_ADICIONAL','bonificacionAdicionalBonoEscolar'],0)),AGUINALDO_FIESTAS_PATRIAS:round(field(res,['AGUINALDO_FIESTAS_PATRIAS','aguinaldos','aguinaldoFiestasPatrias'],0)),AGUINALDO_NAVIDAD:round(field(res,['AGUINALDO_NAVIDAD','aguinaldoNavidad'],0)),BONO_VACACIONES:round(field(res,['BONO_VACACIONES','bonoVacaciones'],0)),BONO_TERMINO_CONFLICTO:round(field(res,['BONO_TERMINO_CONFLICTO','bonoTerminoConflicto'],0)),TOTAL_HABERES:cf,TOTAL_IMPONIBLE:round(field(res,['TOTAL_IMPONIBLE','basePrevisional'],0)),MUTUAL_ACHS:round(field(res,['MUTUAL_ACHS','mutualAchs'],0)),SEGURO_SOCIAL_PREVISIONAL:round(field(res,['SEGURO_SOCIAL_PREVISIONAL','seguroSocial'],0)),SIS:round(field(res,['SIS','sis'],0)),APORTE_CUENTA_INDIVIDUAL:round(field(res,['APORTE_CUENTA_INDIVIDUAL','aporteCuenta'],0)),FONDO_BONIFICACION_RETIRO:round(field(res,['FONDO_BONIFICACION_RETIRO','fondoRetiro'],0)),GLOSAS:round(field(res,['GLOSAS','glosas'],0)),COSTO_FUNCIONARIO:cf,COSTO_MINISTERIO:cm,COSTO_MINISTERIO_CON_GLOSAS:cmg,REMUNERACION_LIQUIDA_BONOS:round(field(res,['REMUNERACION_LIQUIDA_BONOS','remuneracionLiquidaBonos'],0)),FACTOR_RES5_ACUMULADO:aut?field(res,['FACTOR_RES5_ACUMULADO','factorRes5'], ''):'',TRAZABILIDAD_REAJUSTE_RES5:aut?field(res,['TRAZABILIDAD_REAJUSTE_RES5'], ''):'',REAJUSTE_GENERAL_SP_ACUMULADO_PCT:Number((reajAcum||0).toFixed(4)),ADVERTENCIA_COMPONENTES:res.ADVERTENCIA_COMPONENTES||'',COMPONENTES_NO_CALCULADOS:res.COMPONENTES_NO_CALCULADOS||'',ESTADO_PARIDAD_MOTOR:res.ESTADO_PARIDAD_MOTOR||'OK',ORIGEN_CALCULO:res.ORIGEN_CALCULO||res.origenCalculo||(aut?'MOTOR_INDIVIDUAL_BASE_AUTORIDAD_RES5':'MOTOR_INDIVIDUAL_BASE'),__RES:res,__RAW:raw};
+  }
+  function detalleMensualDesdeAnual(r){
+    const aut=esAutoridad(r), hon=esHonorario(r); const det=Array.isArray(r.__RES&&r.__RES.__detalleMensualAutoridadRes5)?r.__RES.__detalleMensualAutoridadRes5:[];
+    if(aut && det.length){ return det.map((d,i)=>{ const m=Number(d.MES||d.MES_NUMERO||i+1); const cf=round(d.TOTAL_FUNCIONARIO||d.COSTO_FUNCIONARIO||0); const aportes=round(d.MUTUAL_ACHS)+round(d.SEGURO_SOCIAL_PREVISIONAL)+round(d.SIS)+round(d.APORTE_CUENTA_INDIVIDUAL)+round(d.FONDO_BONIFICACION_RETIRO)+round(d.BIENESTAR_INSTITUCIONAL); return {...clean(r),ANIO:Number(d.ANIO||r.ANIO),MES_NUMERO:m,MES_NOMBRE:MESES[m-1],TIPO_MES:'AUTORIDAD_RES5_DETALLE_MOTOR',COSTO_FUNCIONARIO:cf,COSTO_MINISTERIO:cf+aportes,COSTO_MINISTERIO_CON_GLOSAS:cf+aportes,PMG:0,PMG_BASE_15:0,INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6:0,DESEMPENO_COLECTIVO:0,PMG_TOTAL_MODERNIZACION:0,BONOS_REAJUSTE:round(d.BONOS_REAJUSTE),MUTUAL_ACHS:round(d.MUTUAL_ACHS),SEGURO_SOCIAL_PREVISIONAL:round(d.SEGURO_SOCIAL_PREVISIONAL),SIS:round(d.SIS),APORTE_CUENTA_INDIVIDUAL:round(d.APORTE_CUENTA_INDIVIDUAL),FONDO_BONIFICACION_RETIRO:round(d.FONDO_BONIFICACION_RETIRO),BIENESTAR_INSTITUCIONAL:round(d.BIENESTAR_INSTITUCIONAL)}; }); }
+    const pmgAnual=hon||aut?0:round(r.PMG), dcAnual=hon||aut?0:round(r.DESEMPENO_COLECTIVO);
+    const pmgMes=distribuir(pmgAnual,PMG_MESES), dcMes=distribuir(dcAnual,PMG_MESES);
+    const bonosMes={}; for(let m=1;m<=12;m++) bonosMes[m]=0;
+    bonosMes[1]+=round(r.BONO_VACACIONES); const esc=distribuir(round(r.BONO_ESCOLARIDAD),[3,6]); bonosMes[3]+=round(esc[3]); bonosMes[6]+=round(esc[6]); bonosMes[3]+=round(r.BONO_ESCOLARIDAD_ADICIONAL); bonosMes[9]+=round(r.AGUINALDO_FIESTAS_PATRIAS); bonosMes[12]+=round(r.AGUINALDO_NAVIDAD)+round(r.BONO_TERMINO_CONFLICTO);
+    const bonosTotal=Object.values(bonosMes).reduce((a,b)=>a+round(b),0); const baseFuncionarioAnual=Math.max(0,round(r.COSTO_FUNCIONARIO)-pmgAnual-dcAnual-bonosTotal); const baseMes=distribuir(baseFuncionarioAnual,[1,2,3,4,5,6,7,8,9,10,11,12]); const aporteAnual=Math.max(0,round(r.COSTO_MINISTERIO)-round(r.COSTO_FUNCIONARIO)); const cmgExtraAnual=Math.max(0,round(r.COSTO_MINISTERIO_CON_GLOSAS)-round(r.COSTO_MINISTERIO));
+    const out=[]; let acf=0;
+    for(let m=1;m<=12;m++){
+      let cf=round(baseMes[m])+round(pmgMes[m])+round(dcMes[m])+round(bonosMes[m]); if(m===12) cf=round(r.COSTO_FUNCIONARIO)-acf; acf+=cf;
+      const peso=round(r.COSTO_FUNCIONARIO)>0?cf/round(r.COSTO_FUNCIONARIO):1/12; const aportePrev=out.reduce((s,x)=>s+(round(x.COSTO_MINISTERIO)-round(x.COSTO_FUNCIONARIO)),0); const aporte=m===12?aporteAnual-aportePrev:Math.round(aporteAnual*peso); const glosaPrev=out.reduce((s,x)=>s+(round(x.COSTO_MINISTERIO_CON_GLOSAS)-round(x.COSTO_MINISTERIO)),0); const glosa=m===12?cmgExtraAnual-glosaPrev:Math.round(cmgExtraAnual*peso); const cm=cf+aporte;
+      out.push({...clean(r),ANIO:r.ANIO,MES_NUMERO:m,MES_NOMBRE:MESES[m-1],TIPO_MES:hon?'HONORARIOS_DISTRIBUCION_AUDITADA':'EUS_PMG_DC_TRIMESTRAL_SEPARADO',COSTO_FUNCIONARIO:cf,COSTO_MINISTERIO:cm,COSTO_MINISTERIO_CON_GLOSAS:cm+glosa,PMG:round(pmgMes[m]),DESEMPENO_COLECTIVO:round(dcMes[m]),PMG_TOTAL_MODERNIZACION:round(pmgMes[m])+round(dcMes[m]),PMG_BASE_15:round(pmgMes[m])?Math.round(round(pmgMes[m])*15/PCT_PMG_INSTITUCIONAL):0,INCREMENTO_DESEMPENO_INSTITUCIONAL_7_6:round(pmgMes[m])-(round(pmgMes[m])?Math.round(round(pmgMes[m])*15/PCT_PMG_INSTITUCIONAL):0),BONOS_REAJUSTE:round(bonosMes[m])});
+    }
+    return out;
+  }
+  function agrupar(rows,dims,sums){ const map=new Map(); (rows||[]).forEach(r=>{ const k=dims.map(d=>r[d]??'').join('|'); if(!map.has(k)){ const o={}; dims.forEach(d=>o[d]=r[d]??''); sums.forEach(s=>o[s]=0); o.DOTACION_FILAS=0; map.set(k,o); } const o=map.get(k); o.DOTACION_FILAS++; sums.forEach(s=>o[s]+=round(r[s])); }); return Array.from(map.values()).sort((a,b)=>(a.ANIO-b.ANIO)||((a.MES_NUMERO||0)-(b.MES_NUMERO||0))||String(a.CODIGO_PROGRAMA||'').localeCompare(String(b.CODIGO_PROGRAMA||''))); }
+  function addSheet(wb,name,data){ const arr=(data&&data.length?data:[{AVISO:'SIN_DATOS'}]).map(clean); const ws=XLSX.utils.json_to_sheet(arr,{skipHeader:false}); const headers=Object.keys(arr[0]||{}); ws['!cols']=headers.map(h=>({wch:Math.min(62,Math.max(12,String(h).length+3))})); XLSX.utils.book_append_sheet(wb,ws,String(name).slice(0,31)); }
+  function anual(rows){ const base=anioBase(); const out=[]; let factor=1; for(let i=0;i<5;i++){ const anio=base+i; const reaj=reajusteProyPorAnio(anio); factor*=(1+reaj/100); const reajAcum=(factor-1)*100; (rows||[]).forEach((raw,idx)=>{ const clone=cloneForYear(raw,anio,reajAcum); try{ const res=window.calcularFuncionarioBase(clone,{fila:idx+1,anio,modo:'exportacion_v233_pmg_dc_clasificador',reajusteAcumuladoPct:reajAcum}); out.push(annualRow(res||{},clone,idx,anio,i===0?'RESULTADO_NOMINA':'PROYECCION',reajAcum)); } catch(e){ out.push({ANIO:anio,FILA_ORIGEN:idx+1,ORIGEN:'ERROR',COSTO_FUNCIONARIO:0,COSTO_MINISTERIO:0,COSTO_MINISTERIO_CON_GLOSAS:0,PMG:0,DESEMPENO_COLECTIVO:0,ESTADO_PARIDAD_MOTOR:'ERROR_VALIDACION',ORIGEN_CALCULO:'ERROR_VALIDACION',ADVERTENCIA_COMPONENTES:String(e&&e.message||e),__RES:{},__RAW:clone}); } }); } return out; }
+  function mensual(annual){ const all=[]; (annual||[]).forEach(r=>{ const rows=detalleMensualDesdeAnual(r); all.push(...rows); r.COSTO_FUNCIONARIO=rows.reduce((s,x)=>s+round(x.COSTO_FUNCIONARIO),0); r.TOTAL_HABERES=r.COSTO_FUNCIONARIO; r.COSTO_MINISTERIO=rows.reduce((s,x)=>s+round(x.COSTO_MINISTERIO),0); r.COSTO_MINISTERIO_CON_GLOSAS=rows.reduce((s,x)=>s+round(x.COSTO_MINISTERIO_CON_GLOSAS),0); r.PMG=rows.reduce((s,x)=>s+round(x.PMG),0); r.DESEMPENO_COLECTIVO=rows.reduce((s,x)=>s+round(x.DESEMPENO_COLECTIVO),0); r.PMG_TOTAL_MODERNIZACION=r.PMG+r.DESEMPENO_COLECTIVO; }); return all.sort((a,b)=>(a.ANIO-b.ANIO)||(a.MES_NUMERO-b.MES_NUMERO)||((a.FILA_ORIGEN||0)-(b.FILA_ORIGEN||0))); }
+  function clasificadorDesdeMensual(rows){
+    const out=[];
+    (rows||[]).forEach(r=>{ const item=itemS21(r); const base={ANIO:r.ANIO,MES_NUMERO:r.MES_NUMERO,MES_NOMBRE:r.MES_NOMBRE,FILA_ORIGEN:r.FILA_ORIGEN,RUT:r.RUT||'',NOMBRE:r.NOMBRE||'',CODIGO_PROGRAMA:r.CODIGO_PROGRAMA,NOMBRE_PROGRAMA:r.NOMBRE_PROGRAMA,CALIDAD_JURIDICA:r.CALIDAD_JURIDICA,ESTAMENTO:r.ESTAMENTO,GRADO:r.GRADO,SUBTITULO:'21',ITEM:item,GLOSA_ITEM:nombreItemS21(item),ASIGNACION:'003',GLOSA_ASIGNACION:'Asignaciones por desempeño',ORIGEN_CALCULO:r.ORIGEN_CALCULO};
+      if(round(r.PMG)>0) out.push({...base,CODIGO_CLASIFICADOR:`21.${item}.003.001`,SUBASIGNACION:'001',GLOSA_SUBASIGNACION:'Asignación por desempeño institucional Ley 19.553 y otras asignaciones por desempeño',COMPONENTE_ORIGEN:'PMG',MONTO:round(r.PMG)});
+      if(round(r.DESEMPENO_COLECTIVO)>0) out.push({...base,CODIGO_CLASIFICADOR:`21.${item}.003.002`,SUBASIGNACION:'002',GLOSA_SUBASIGNACION:'Desempeño colectivo',COMPONENTE_ORIGEN:'DESEMPENO_COLECTIVO',MONTO:round(r.DESEMPENO_COLECTIVO)});
+    });
+    return out;
+  }
+  function control(resultado,detalle,mensualRows,clas){ const base=anioBase(); const sum=(rows,c)=>rows.reduce((s,r)=>s+round(r[c]),0); const detBase=detalle.filter(r=>Number(r.ANIO)===base), menBase=mensualRows.filter(r=>Number(r.ANIO)===base); const duplicados=detalle.filter(r=>round(r.PMG)>0 && round(r.PMG)===round(r.DESEMPENO_COLECTIVO)).length; return [{CONTROL:'ANIO_BASE',VALOR:base},{CONTROL:'CUADRATURA_RESULTADO_DETALLE_COSTO_MINISTERIO',VALOR:sum(resultado,'COSTO_MINISTERIO')-sum(detBase,'COSTO_MINISTERIO')},{CONTROL:'CUADRATURA_DETALLE_MENSUAL_COSTO_MINISTERIO',VALOR:sum(detBase,'COSTO_MINISTERIO')-sum(menBase,'COSTO_MINISTERIO')},{CONTROL:'PMG_INSTITUCIONAL_TOTAL',VALOR:sum(detalle,'PMG')},{CONTROL:'DESEMPENO_COLECTIVO_TOTAL',VALOR:sum(detalle,'DESEMPENO_COLECTIVO')},{CONTROL:'FILAS_PMG_IGUAL_DC',VALOR:duplicados},{CONTROL:'DETALLE_CLASIFICADOR_FILAS',VALOR:(clas||[]).length},{CONTROL:'REGLA_CLASIFICADOR',VALOR:'21.01/21.02.003.001 = PMG institucional Ley 19.553; 21.01/21.02.003.002 = desempeño colectivo.'},{CONTROL:'ESTADO',VALOR:(sum(resultado,'COSTO_MINISTERIO')===sum(detBase,'COSTO_MINISTERIO') && sum(detBase,'COSTO_MINISTERIO')===sum(menBase,'COSTO_MINISTERIO') && duplicados===0)?'OK':'REVISAR'}]; }
+
+  window.descargarExcelConsolidadoNominaV36 = function descargarExcelConsolidadoNominaV233(){
+    try{
+      if(!window.XLSX){ alert('No se pudo cargar SheetJS/XLSX.'); return; }
+      if(typeof window.actualizarSISConfigV34==='function') try{ window.actualizarSISConfigV34(); }catch(e){}
+      const fuente=fuenteRows(); if(!fuente.length){ alert('Primero carga y procesa una nómina masiva.'); return; }
+      const detalle=anual(fuente); const mensualRows=mensual(detalle); const base=anioBase(); const resultado=detalle.filter(r=>Number(r.ANIO)===base).map(r=>({...r,ORIGEN:'RESULTADO_NOMINA'})); const clas=clasificadorDesdeMensual(mensualRows);
+      const wb=XLSX.utils.book_new();
+      addSheet(wb,'CONTROL_PARIDAD',control(resultado,detalle,mensualRows,clas));
+      addSheet(wb,'RESULTADO_NOMINA',resultado);
+      addSheet(wb,'DETALLE_PROYECCION',detalle);
+      addSheet(wb,'S21_DETALLE_MENSUAL',mensualRows);
+      addSheet(wb,'S21_RESUMEN_MENSUAL',agrupar(mensualRows,['ANIO','MES_NUMERO','MES_NOMBRE','CODIGO_PROGRAMA','CALIDAD_JURIDICA'],['COSTO_FUNCIONARIO','COSTO_MINISTERIO','COSTO_MINISTERIO_CON_GLOSAS','PMG','DESEMPENO_COLECTIVO','PMG_TOTAL_MODERNIZACION','BONOS_REAJUSTE','SIS']));
+      addSheet(wb,'RESUMEN_PROGRAMA',agrupar(detalle,['ANIO','CODIGO_PROGRAMA','NOMBRE_PROGRAMA','CALIDAD_JURIDICA'],['COSTO_FUNCIONARIO','COSTO_MINISTERIO','COSTO_MINISTERIO_CON_GLOSAS','PMG','DESEMPENO_COLECTIVO','PMG_TOTAL_MODERNIZACION']));
+      addSheet(wb,'DETALLE_CLASIFICADOR',clas);
+      addSheet(wb,'RESUMEN_CLASIFICADOR',agrupar(clas,['ANIO','CODIGO_PROGRAMA','NOMBRE_PROGRAMA','SUBTITULO','ITEM','GLOSA_ITEM','ASIGNACION','GLOSA_ASIGNACION','SUBASIGNACION','GLOSA_SUBASIGNACION','COMPONENTE_ORIGEN'],['MONTO']));
+      XLSX.writeFile(wb,'nomina_costeada_motor_base_s21_v23_3_pmg_dc_clasificador_detallado.xlsx');
+    } catch(err){ console.error(err); alert('Error al exportar Excel v23.3 PMG/DC clasificador: '+(err&&err.message||err)); }
+  };
+  window.descargarNominaXLSX = window.descargarExcelConsolidadoNominaV36;
+  window.descargarProyeccionCincoAniosXLSX = window.descargarExcelConsolidadoNominaV36;
+})();
+</script>
+
 </body>
 </html>
