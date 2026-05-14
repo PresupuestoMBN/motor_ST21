@@ -18047,5 +18047,418 @@ function descargarFormatoNomina(){
 </script>
 
 <!-- v24.2 hotfix: cache ejecutivo S21 + reconocimiento HSA/honorarios en escenarios de contención. -->
+
+
+<script>
+/* v24.3 — Corrección Excel input: Validaciones de ZONA con codigoZona exacto.
+   Alcance deliberado: sólo corrige la plantilla de carga masiva. El motor sigue calculando
+   asignación de zona y zona extrema a partir del código leído en ZONA / LOCALIDAD_ZONA. */
+(function(){
+  'use strict';
+  if (window.__MBN_INPUT_ZONA_VALIDACIONES_V243__) return;
+  window.__MBN_INPUT_ZONA_VALIDACIONES_V243__ = true;
+
+  const ZONAS_INPUT_V243 = [
+    {codigoZona:'RM',    nombreReferencial:'RM — Metropolitana — 0%'},
+    {codigoZona:'V',     nombreReferencial:'V — Valparaíso — 0%'},
+    {codigoZona:'V_IP',  nombreReferencial:'V_IP — Isla de Pascua — 140%'},
+    {codigoZona:'VI',    nombreReferencial:'VI — Rancagua — 0%'},
+    {codigoZona:'VII',   nombreReferencial:'VII — Maule — 0%'},
+    {codigoZona:'XVII',  nombreReferencial:'XVII — Norte Central — 0%'},
+    {codigoZona:'I',     nombreReferencial:'I — Tarapacá — 40%'},
+    {codigoZona:'II',    nombreReferencial:'II — Antofagasta — 30%'},
+    {codigoZona:'II_CA', nombreReferencial:'II_CA — Calama — 35%'},
+    {codigoZona:'III',   nombreReferencial:'III — Atacama — 25%'},
+    {codigoZona:'IV_CQ', nombreReferencial:'IV_CQ — Coquimbo — 10%'},
+    {codigoZona:'IV_OV', nombreReferencial:'IV_OV — Ovalle — 15%'},
+    {codigoZona:'VIII',  nombreReferencial:'VIII — Biobío — 20%'},
+    {codigoZona:'IX',    nombreReferencial:'IX — La Araucanía — 15%'},
+    {codigoZona:'X_PM',  nombreReferencial:'X_PM — Puerto Montt — 15%'},
+    {codigoZona:'X_OS',  nombreReferencial:'X_OS — Osorno — 15%'},
+    {codigoZona:'X_CH',  nombreReferencial:'X_CH — Chiloé / Castro — 40%'},
+    {codigoZona:'X_CP',  nombreReferencial:'X_CP — Chaitén / Palena — 90%'},
+    {codigoZona:'XI',    nombreReferencial:'XI — Aysén — 105%'},
+    {codigoZona:'XII',   nombreReferencial:'XII — Magallanes — 70%'},
+    {codigoZona:'XIV',   nombreReferencial:'XIV — Los Ríos — 15%'},
+    {codigoZona:'XV',    nombreReferencial:'XV — Arica y Parinacota — 40%'},
+    {codigoZona:'XVI',   nombreReferencial:'XVI — Ñuble / Chillán — 15%'}
+  ];
+
+  const PROGRAMAS_INPUT_V243 = [
+    {codigo:'01', nombre:'Subsecretaría'},
+    {codigo:'02', nombre:'Regularización de la Propiedad Raíz'},
+    {codigo:'03', nombre:'Administración de Bienes'},
+    {codigo:'04', nombre:'Catastro'}
+  ];
+
+  function addDataValidation(ws, sqref, formula1, mensaje){
+    ws['!dataValidations'] = ws['!dataValidations'] || [];
+    ws['!dataValidation'] = ws['!dataValidation'] || [];
+    const dv = {
+      sqref,
+      type:'list',
+      allowBlank:true,
+      showErrorMessage:true,
+      errorTitle:'Valor no permitido',
+      error: mensaje || 'Seleccione un valor definido en la hoja Validaciones.',
+      formulae:[formula1]
+    };
+    ws['!dataValidations'].push(dv);
+    ws['!dataValidation'].push(dv);
+  }
+
+  function addWholeValidation(ws, sqref, min, mensaje){
+    ws['!dataValidations'] = ws['!dataValidations'] || [];
+    ws['!dataValidation'] = ws['!dataValidation'] || [];
+    const dv = {sqref,type:'whole',operator:'greaterThanOrEqual',allowBlank:true,showErrorMessage:true,errorTitle:'Valor no permitido',error:mensaje || 'Debe ingresar un entero válido.',formulae:[String(min)]};
+    ws['!dataValidations'].push(dv); ws['!dataValidation'].push(dv);
+  }
+
+  function addDecimalValidation(ws, sqref, min, mensaje){
+    ws['!dataValidations'] = ws['!dataValidations'] || [];
+    ws['!dataValidation'] = ws['!dataValidation'] || [];
+    const dv = {sqref,type:'decimal',operator:'greaterThanOrEqual',allowBlank:true,showErrorMessage:true,errorTitle:'Valor no permitido',error:mensaje || 'Debe ingresar un número válido.',formulae:[String(min)]};
+    ws['!dataValidations'].push(dv); ws['!dataValidation'].push(dv);
+  }
+
+  function col(headers, name){
+    const idx = headers.findIndex(h => String(h).toUpperCase() === String(name).toUpperCase());
+    return idx >= 0 ? XLSX.utils.encode_col(idx) : null;
+  }
+
+  window.descargarFormatoNomina = function descargarFormatoNomina(){
+    try{
+      if(!window.XLSX){ alert('No se pudo cargar SheetJS/XLSX.'); return; }
+      const wb = XLSX.utils.book_new();
+      const anio = Number(document.getElementById('projAnioBase')?.value || document.getElementById('anioCalculo')?.value || new Date().getFullYear());
+
+      const headers = [
+        'RUT','NOMBRE','CODIGO_PROGRAMA','PROGRAMA','CALIDAD_JURIDICA','ESTAMENTO','GRADO','CODIGO_INTERNO','CARGO',
+        'FECHA_INGRESO','FECHA_INICIO','FECHA_TERMINO','BIENIOS','ASIGNACION_PROFESIONAL','ASIGNACION_TITULO',
+        'ZONA','COMUNA_LOCALIDAD','RESPONSABILIDAD','BIENESTAR','PMG','DESEMPENO_COLECTIVO','FUNCION_CRITICA',
+        'HORAS_EXTRAS','REMUNERACION_LIQUIDA_BONOS','HSA_SOLICITADAS','TIPO_CUPO','POSIBLE_REAJUSTE_SP'
+      ];
+
+      const ejemplo = {
+        RUT:'12345678', NOMBRE:'Ejemplo funcionario', CODIGO_PROGRAMA:'01', PROGRAMA:'Subsecretaría',
+        CALIDAD_JURIDICA:'Contrata', ESTAMENTO:'Profesional', GRADO:10, CODIGO_INTERNO:'', CARGO:'',
+        FECHA_INGRESO:'01-01-' + anio, FECHA_INICIO:'01-01-' + anio, FECHA_TERMINO:'31-12-' + anio,
+        BIENIOS:0, ASIGNACION_PROFESIONAL:'Automática', ASIGNACION_TITULO:'', ZONA:'RM', COMUNA_LOCALIDAD:'',
+        RESPONSABILIDAD:'No', BIENESTAR:'No', PMG:'Sí', DESEMPENO_COLECTIVO:8, FUNCION_CRITICA:0,
+        HORAS_EXTRAS:0, REMUNERACION_LIQUIDA_BONOS:'', HSA_SOLICITADAS:0, TIPO_CUPO:'DOTACION_PLANTA_CONTRATA', POSIBLE_REAJUSTE_SP:'Sí'
+      };
+      const wsNom = XLSX.utils.json_to_sheet([ejemplo], {header:headers});
+      wsNom['!cols'] = headers.map(h => ({wch: Math.min(40, Math.max(14, String(h).length + 4))}));
+
+      // Hoja visible para que el usuario vea exactamente qué códigos son válidos.
+      const validaciones = [];
+      validaciones.push(['codigoZona','nombreReferencial','','codigoPrograma','nombrePrograma','','Sí/No','Calidad jurídica','Estamento','Asignación profesional','Tipo cupo']);
+      const sino = ['Sí','No'];
+      const calidades = ['Planta','Contrata','Honorarios','Honorarios/HSA','HSA'];
+      const estamentos = ['Autoridad art. 38 bis (Res. 5)','Directivo','Profesional','Técnico','Administrativo','Auxiliar'];
+      const asigProf = ['Automática','Sí','No'];
+      const tiposCupo = ['DOTACION_PLANTA_CONTRATA','DOTACION','PLANTA_CONTRATA','HSA','HONORARIOS'];
+      const maxRows = Math.max(ZONAS_INPUT_V243.length, PROGRAMAS_INPUT_V243.length, sino.length, calidades.length, estamentos.length, asigProf.length, tiposCupo.length);
+      for(let i=0;i<maxRows;i++){
+        validaciones.push([
+          ZONAS_INPUT_V243[i]?.codigoZona || '', ZONAS_INPUT_V243[i]?.nombreReferencial || '', '',
+          PROGRAMAS_INPUT_V243[i]?.codigo || '', PROGRAMAS_INPUT_V243[i]?.nombre || '', '',
+          sino[i] || '', calidades[i] || '', estamentos[i] || '', asigProf[i] || '', tiposCupo[i] || ''
+        ]);
+      }
+      const wsVal = XLSX.utils.aoa_to_sheet(validaciones);
+      wsVal['!cols'] = [{wch:16},{wch:42},{wch:4},{wch:18},{wch:42},{wch:4},{wch:10},{wch:20},{wch:34},{wch:24},{wch:30}];
+
+      XLSX.utils.book_append_sheet(wb, wsNom, 'NOMINA');
+      XLSX.utils.book_append_sheet(wb, wsVal, 'Validaciones');
+
+      const filas = '2:5000';
+      const cZona = col(headers,'ZONA');
+      if(cZona) addDataValidation(wsNom, `${cZona}${filas}`, `'Validaciones'!$A$2:$A$${ZONAS_INPUT_V243.length+1}`, 'Localidad/Zona no válida. Use sólo un codigoZona definido en la hoja Validaciones, por ejemplo V, V_IP, X_PM, X_CH o RM.');
+      const cProg = col(headers,'CODIGO_PROGRAMA');
+      if(cProg) addDataValidation(wsNom, `${cProg}${filas}`, `'Validaciones'!$D$2:$D$${PROGRAMAS_INPUT_V243.length+1}`, 'Seleccione un CODIGO_PROGRAMA válido desde la hoja Validaciones.');
+      const cCalidad = col(headers,'CALIDAD_JURIDICA');
+      if(cCalidad) addDataValidation(wsNom, `${cCalidad}${filas}`, `'Validaciones'!$H$2:$H$${calidades.length+1}`, 'Seleccione una calidad jurídica válida.');
+      const cEst = col(headers,'ESTAMENTO');
+      if(cEst) addDataValidation(wsNom, `${cEst}${filas}`, `'Validaciones'!$I$2:$I$${estamentos.length+1}`, 'Seleccione un estamento válido.');
+      const cAsig = col(headers,'ASIGNACION_PROFESIONAL');
+      if(cAsig) addDataValidation(wsNom, `${cAsig}${filas}`, `'Validaciones'!$J$2:$J$${asigProf.length+1}`, 'Seleccione Automática, Sí o No.');
+      const cTipo = col(headers,'TIPO_CUPO');
+      if(cTipo) addDataValidation(wsNom, `${cTipo}${filas}`, `'Validaciones'!$K$2:$K$${tiposCupo.length+1}`, 'Seleccione un tipo de cupo válido.');
+      ['RESPONSABILIDAD','BIENESTAR','PMG','POSIBLE_REAJUSTE_SP'].forEach(h => { const c=col(headers,h); if(c) addDataValidation(wsNom, `${c}${filas}`, `'Validaciones'!$G$2:$G$${sino.length+1}`, 'Seleccione Sí o No.'); });
+      ['GRADO','BIENIOS','HSA_SOLICITADAS'].forEach(h => { const c=col(headers,h); if(c) addWholeValidation(wsNom, `${c}${filas}`, '0', 'Ingrese un número entero igual o superior a cero.'); });
+      ['DESEMPENO_COLECTIVO','FUNCION_CRITICA','HORAS_EXTRAS','REMUNERACION_LIQUIDA_BONOS'].forEach(h => { const c=col(headers,h); if(c) addDecimalValidation(wsNom, `${c}${filas}`, '0', 'Ingrese un número igual o superior a cero.'); });
+
+      const parametros = [];
+      PROGRAMAS_INPUT_V243.forEach(p => {
+        parametros.push({ANIO:anio,SERVICIO:'MBN',CODIGO_PROGRAMA:p.codigo,PROGRAMA:p.nombre,TIPO_CUPO:'DOTACION_PLANTA_CONTRATA',MAXIMO_AUTORIZADO:'',USADO_ACTUAL:'',DISPONIBLE_INICIAL:'',FUENTE_NORMA:'Ley de Presupuestos',OBSERVACION:'Completar dotación máxima autorizada.'});
+        parametros.push({ANIO:anio,SERVICIO:'MBN',CODIGO_PROGRAMA:p.codigo,PROGRAMA:p.nombre,TIPO_CUPO:'HSA',MAXIMO_AUTORIZADO:'',USADO_ACTUAL:'',DISPONIBLE_INICIAL:'',FUENTE_NORMA:'Ley de Presupuestos',OBSERVACION:'Completar máximo HSA autorizado.'});
+      });
+      const wsPar = XLSX.utils.json_to_sheet(parametros);
+      wsPar['!cols'] = Object.keys(parametros[0]||{}).map(h => ({wch: Math.min(44, Math.max(14, h.length + 4))}));
+      XLSX.utils.book_append_sheet(wb, wsPar, 'PARAMETROS_CUPOS');
+
+      const guia = [
+        {CAMPO:'ZONA', USO:'Debe contener exclusivamente el codigoZona de la hoja Validaciones. Ej.: V para Valparaíso, V_IP para Isla de Pascua, X_PM para Puerto Montt, X_CH para Chiloé/Castro. No ingrese nombres de regiones, números de región ni textos descriptivos.'},
+        {CAMPO:'Validaciones.codigoZona', USO:'Es la única llave que procesa el motor para asignación de zona. La columna nombreReferencial es sólo informativa.'},
+        {CAMPO:'COMUNA_LOCALIDAD', USO:'Campo descriptivo opcional; no reemplaza el código ZONA.'},
+        {CAMPO:'Cálculo de zona', USO:'No se calcula en este Excel. El motor HTML procesa el código ZONA contra su objeto global ZONAS.'},
+        {CAMPO:'Códigos ambiguos', USO:'No use 05, 10, Valparaíso, Los Lagos, Isla de Pascua o Puerto Montt como valor de ZONA. Use V, V_IP, X_PM, X_OS, X_CH o X_CP según corresponda.'}
+      ];
+      const wsGuia = XLSX.utils.json_to_sheet(guia);
+      wsGuia['!cols'] = [{wch:28},{wch:130}];
+      XLSX.utils.book_append_sheet(wb, wsGuia, 'GUIA_USO');
+
+      XLSX.writeFile(wb, 'formato_nomina_mbn_input_validaciones_zona.xlsx');
+      const st=document.getElementById('bulkStatus');
+      if(st) st.innerHTML='<div class="file-status ok">✅ Formato Excel limpio descargado: la hoja Validaciones incluye codigoZona y la columna ZONA guarda sólo el código.</div>';
+    } catch(err){
+      console.error(err);
+      alert('No se pudo generar formato Excel limpio con validaciones de zona: ' + (err.message || err));
+    }
+  };
+})();
+</script>
+
+
+
+<script>
+/* v24.4 — Formato Excel input alineado a Nómina.xlsx
+   - Usa sólo las hojas de estructura: PARAMETROS_CUPOS, Nomina input, Guia columnas y Validaciones.
+   - No incorpora datos personales ni filas de la nómina cargada.
+   - No crea Hoja1.
+   - La columna Localidad/Zona valida y guarda sólo el código de zona que procesa el motor.
+*/
+(function(){
+  const ZONAS_INPUT_V244 = [
+    'RM','V','V_IP','VI','VII','XVII','I','II','II_CA','III','IV_CQ','IV_OV','VIII','IX','X_PM','X_OS','X_CH','X_CP','XI','XII','XIV','XV','XVI'
+  ];
+  const ZONA_NOMBRES_V244 = {
+    RM:'Metropolitana — 0%',
+    V:'Valparaíso — 0%',
+    V_IP:'Isla de Pascua — 140%',
+    VI:'Rancagua — 0%',
+    VII:'Maule — 0%',
+    XVII:'Norte Central — 0%',
+    I:'Tarapacá — 40%',
+    II:'Antofagasta — 30%',
+    II_CA:'Calama — 35%',
+    III:'Atacama — 25%',
+    IV_CQ:'Coquimbo — 10%',
+    IV_OV:'Ovalle — 15%',
+    VIII:'Biobío — 20%',
+    IX:'La Araucanía — 15%',
+    X_PM:'Puerto Montt — 15%',
+    X_OS:'Osorno — 15%',
+    X_CH:'Chiloé / Castro — 40%',
+    X_CP:'Chaitén / Palena — 90%',
+    XI:'Aysén — 105%',
+    XII:'Magallanes — 70%',
+    XIV:'Los Ríos — 15%',
+    XV:'Arica y Parinacota — 40%',
+    XVI:'Ñuble / Chillán — 15%'
+  };
+  const PROGRAMAS_INPUT_V244 = [
+    ['01','Subsecretaría'],
+    ['02','Regularización de la Propiedad Raíz'],
+    ['03','Administración de Bienes'],
+    ['04','Catastro']
+  ];
+  const CALIDAD_V244 = ['Planta','Contrata','Honorarios/HSA','HSA','Honorarios'];
+  const ESTAMENTOS_V244 = ['Autoridad art. 38 bis (Res. 5)','SEREMI','Directivo','Profesional','Técnico','Administrativo','Auxiliar','Honorarios'];
+  const SI_NO_V244 = ['Sí','No'];
+  const ASIG_PROF_V244 = ['Automática','Sí','No'];
+  const TIPO_CUPO_V244 = ['DOTACION_PLANTA_CONTRATA','HSA'];
+
+  function aoaSheet(rows){ return XLSX.utils.aoa_to_sheet(rows); }
+  function setCols(ws, widths){ ws['!cols'] = widths.map(w => ({wch:w})); }
+  function addValidation(ws, sqref, formula1, error){
+    ws['!dataValidations'] = ws['!dataValidations'] || [];
+    ws['!dataValidation'] = ws['!dataValidation'] || [];
+    const dv = {sqref, type:'list', allowBlank:true, showErrorMessage:true, showInputMessage:true, errorTitle:'Valor no permitido', error:error || 'Seleccione un valor desde la hoja Validaciones.', formulae:[formula1]};
+    ws['!dataValidations'].push(dv);
+    ws['!dataValidation'].push(dv);
+  }
+  function addDecimalValidation(ws, sqref, min, max, error){
+    ws['!dataValidations'] = ws['!dataValidations'] || [];
+    ws['!dataValidation'] = ws['!dataValidation'] || [];
+    const dv = {sqref, type:'decimal', operator:max===undefined?'greaterThanOrEqual':'between', allowBlank:true, showErrorMessage:true, errorTitle:'Valor no permitido', error:error || 'Ingrese un número válido.', formulae:max===undefined?[String(min)]:[String(min),String(max)]};
+    ws['!dataValidations'].push(dv);
+    ws['!dataValidation'].push(dv);
+  }
+  function addWholeValidation(ws, sqref, min, error){
+    ws['!dataValidations'] = ws['!dataValidations'] || [];
+    ws['!dataValidation'] = ws['!dataValidation'] || [];
+    const dv = {sqref, type:'whole', operator:'greaterThanOrEqual', allowBlank:true, showErrorMessage:true, errorTitle:'Valor no permitido', error:error || 'Ingrese un entero válido.', formulae:[String(min)]};
+    ws['!dataValidations'].push(dv);
+    ws['!dataValidation'].push(dv);
+  }
+  function col(headers, name){
+    const idx = headers.findIndex(h => String(h).trim().toUpperCase() === String(name).trim().toUpperCase());
+    return idx >= 0 ? XLSX.utils.encode_col(idx) : null;
+  }
+  function styleHeader(ws, headerCount){
+    if(!ws || !ws['!ref']) return;
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    for(let c=0;c<headerCount;c++){
+      const addr = XLSX.utils.encode_cell({r:0,c});
+      ws[addr] = ws[addr] || {t:'s',v:''};
+      ws[addr].s = {font:{bold:true,color:{rgb:'FFFFFF'}}, fill:{fgColor:{rgb:'0F69B4'}}, alignment:{horizontal:'center',vertical:'center',wrapText:true}};
+    }
+  }
+
+  window.descargarFormatoNomina = function descargarFormatoNominaV244(){
+    try{
+      if(!window.XLSX){ alert('No se pudo cargar SheetJS/XLSX.'); return; }
+      const wb = XLSX.utils.book_new();
+
+      // 1) PARAMETROS_CUPOS: misma estructura del archivo de referencia, sin datos de nómina.
+      const cuposRows = [[
+        'CODIGO_PROGRAMA','NOMBRE_PROGRAMA','TIPO_CUPO','MAXIMO_AUTORIZADO','FUENTE_NORMA','OBSERVACION'
+      ]];
+      PROGRAMAS_INPUT_V244.forEach(([cod,nombre]) => {
+        cuposRows.push([cod,nombre,'DOTACION_PLANTA_CONTRATA','','Ley de Presupuestos','Validar contra Ley de Presupuestos vigente antes de cerrar cálculo.']);
+        cuposRows.push([cod,nombre,'HSA','','Ley de Presupuestos','Validar contra Ley de Presupuestos vigente antes de cerrar cálculo.']);
+      });
+      cuposRows.push(['','','','','','']);
+      cuposRows.push(['NOTA','Estos son máximos legales parametrizados por programa y tipo de cupo. No ingresar usados/comprometidos aquí.','','','','']);
+      cuposRows.push(['NOTA','El uso/compromiso se calcula al cargar la hoja Nomina input.','','','','']);
+      cuposRows.push(['NOTA','Revise o valide estos máximos contra la Ley de Presupuestos vigente antes de producir informes finales.','','','','']);
+      const wsCupos = aoaSheet(cuposRows);
+      setCols(wsCupos,[18,42,28,22,24,76]);
+      styleHeader(wsCupos,6);
+      XLSX.utils.book_append_sheet(wb, wsCupos, 'PARAMETROS_CUPOS');
+
+      // 2) Nomina input: sólo encabezados del formato de referencia, sin filas de datos.
+      const headers = [
+        'CODIGO_PROGRAMA','NOMBRE_PROGRAMA','RUT solo números','Nombre','Calidad jurídica','Estamento','Grado EUS',
+        'Fecha de ingreso dd-mm-aaaa','Fecha inicio período dd-mm-aaaa','Fecha término dd-mm-aaaa','Antigüedad (bienios)',
+        'Localidad/Zona','Asignación profesional','Bienestar institucional','Asignación de responsabilidad','Desempeño colectivo %',
+        'DC máximo %','Cumplimiento DC %','tasa_sis_%','Función crítica $','Horas extras $','Valor mensual honorarios',
+        'Bonificación escolar $','Aguinaldo $','Aplicar bonos Ley Reajuste 2026','N° cargas escolares','REMUNERACION_LIQUIDA_BONOS',
+        'Bono vacaciones Ley 2026','Bono escolaridad Ley 2026','Aguinaldo Fiestas Patrias Ley 2026','Aguinaldo Navidad Ley 2026','Bono término conflicto Ley 2026'
+      ];
+      const wsNom = aoaSheet([headers]);
+      setCols(wsNom,[18,34,18,32,22,28,12,26,28,28,22,18,24,22,28,24,16,20,14,18,18,24,22,18,30,18,30,26,28,34,30,30]);
+      styleHeader(wsNom,headers.length);
+      wsNom['!freeze'] = {xSplit:0,ySplit:1};
+
+      // Validaciones desplegables y numéricas. El valor de Localidad/Zona queda sólo como código.
+      const filas = '2:5000';
+      const cProg = col(headers,'CODIGO_PROGRAMA');
+      if(cProg) addValidation(wsNom, `${cProg}${filas}`, `'Validaciones'!$A$2:$A$${PROGRAMAS_INPUT_V244.length+1}`, 'Seleccione un CODIGO_PROGRAMA válido: 01, 02, 03 o 04.');
+      const cCal = col(headers,'Calidad jurídica');
+      if(cCal) addValidation(wsNom, `${cCal}${filas}`, `'Validaciones'!$D$2:$D$${CALIDAD_V244.length+1}`, 'Seleccione una calidad jurídica válida desde la hoja Validaciones.');
+      const cEst = col(headers,'Estamento');
+      if(cEst) addValidation(wsNom, `${cEst}${filas}`, `'Validaciones'!$E$2:$E$${ESTAMENTOS_V244.length+1}`, 'Seleccione un estamento válido desde la hoja Validaciones.');
+      const cZona = col(headers,'Localidad/Zona');
+      if(cZona) addValidation(wsNom, `${cZona}${filas}`, `'Validaciones'!$H$2:$H$${ZONAS_INPUT_V244.length+1}`, 'Localidad/Zona no válida. Use sólo el código definido en Validaciones, por ejemplo RM, V, V_IP, X_PM, X_CH o XI.');
+      const cAsig = col(headers,'Asignación profesional');
+      if(cAsig) addValidation(wsNom, `${cAsig}${filas}`, `'Validaciones'!$G$2:$G$${ASIG_PROF_V244.length+1}`, 'Seleccione Automática, Sí o No.');
+      ['Bienestar institucional','Asignación de responsabilidad','Aplicar bonos Ley Reajuste 2026','Bono vacaciones Ley 2026','Bono escolaridad Ley 2026','Aguinaldo Fiestas Patrias Ley 2026','Aguinaldo Navidad Ley 2026','Bono término conflicto Ley 2026'].forEach(h => {
+        const c = col(headers,h); if(c) addValidation(wsNom, `${c}${filas}`, `'Validaciones'!$F$2:$F$${SI_NO_V244.length+1}`, 'Seleccione Sí o No.');
+      });
+      ['Grado EUS','Antigüedad (bienios)','N° cargas escolares'].forEach(h => { const c=col(headers,h); if(c) addWholeValidation(wsNom, `${c}${filas}`, 0, 'Ingrese un número entero igual o superior a cero.'); });
+      ['Desempeño colectivo %','DC máximo %','Cumplimiento DC %','tasa_sis_%','Función crítica $','Horas extras $','Valor mensual honorarios','Bonificación escolar $','Aguinaldo $','REMUNERACION_LIQUIDA_BONOS'].forEach(h => { const c=col(headers,h); if(c) addDecimalValidation(wsNom, `${c}${filas}`, 0, undefined, 'Ingrese un número igual o superior a cero.'); });
+      XLSX.utils.book_append_sheet(wb, wsNom, 'Nomina input');
+
+      // 3) Guia columnas: estructura del archivo de referencia, sin filas de personas.
+      const guiaRows = [
+        ['Campo','Uso en calculadora masiva','Obligatorio'],
+        ['CODIGO_PROGRAMA','Código obligatorio del programa presupuestario. Debe coincidir con PARAMETROS_CUPOS: 01, 02, 03 o 04. El motor valida por código, no por texto libre.','Sí'],
+        ['NOMBRE_PROGRAMA','Nombre informativo del programa. No se usa para contar cupos si el código existe.','No'],
+        ['Calidad jurídica','Planta, Contrata u Honorarios/HSA; define reglas y clasificador.','Sí'],
+        ['Estamento','SEREMI, Autoridad art. 38 bis, Directivo, Profesional, Técnico, Administrativo, Auxiliar u Honorarios.','Sí'],
+        ['Grado EUS','Requerido para planta/contrata; no aplica a honorarios.','Condicional'],
+        ['Fechas','Ingreso al servicio, inicio del período y término del período. Acepta dd-mm-aaaa.','Sí'],
+        ['Antigüedad (bienios)','Número de bienios para asignación de antigüedad y simulación posterior. Obligatorio en planta/contrata.','Condicional obligatorio'],
+        ['Localidad/Zona','Código de zona usado por el motor. Debe ser sólo el código de la hoja Validaciones. Ej.: V, V_IP, X_PM, X_CH. No use 05, 10 ni nombres de regiones.','Condicional obligatorio'],
+        ['Asignación profesional','Indica si corresponde asignación profesional. Obligatorio en planta/contrata.','Condicional obligatorio'],
+        ['Bienestar institucional','Indica si se considera aporte institucional de bienestar. Obligatorio en planta/contrata.','Condicional obligatorio'],
+        ['Asignación de responsabilidad','Indica si corresponde asignación de responsabilidad. Obligatorio en planta/contrata.','Condicional obligatorio'],
+        ['PARAMETROS_CUPOS','Hoja inicial con máximos legales por CODIGO_PROGRAMA y TIPO_CUPO. No debe contener usados/comprometidos; esos se cuentan desde NOMINA.','Sí']
+      ];
+      const wsGuia = aoaSheet(guiaRows);
+      setCols(wsGuia,[28,130,26]);
+      styleHeader(wsGuia,3);
+      XLSX.utils.book_append_sheet(wb, wsGuia, 'Guia columnas');
+
+      // 4) Validaciones: misma disposición del archivo de referencia, con Zonas completas.
+      const valRows = [[
+        'CODIGO_PROGRAMA','NOMBRE_PROGRAMA','CODIGO_Y_NOMBRE','Calidad jurídica','Estamentos','Sí/No','Asignación profesional','Zonas','Tipo cupo'
+      ]];
+      const maxRows = Math.max(PROGRAMAS_INPUT_V244.length, CALIDAD_V244.length, ESTAMENTOS_V244.length, SI_NO_V244.length, ASIG_PROF_V244.length, ZONAS_INPUT_V244.length, TIPO_CUPO_V244.length);
+      for(let i=0;i<maxRows;i++){
+        const prog = PROGRAMAS_INPUT_V244[i];
+        const zona = ZONAS_INPUT_V244[i] || '';
+        valRows.push([
+          prog ? prog[0] : '',
+          prog ? prog[1] : '',
+          prog ? `${prog[0]} - ${prog[1]}` : '',
+          CALIDAD_V244[i] || '',
+          ESTAMENTOS_V244[i] || '',
+          SI_NO_V244[i] || '',
+          ASIG_PROF_V244[i] || '',
+          zona,
+          TIPO_CUPO_V244[i] || ''
+        ]);
+      }
+      const wsVal = aoaSheet(valRows);
+      setCols(wsVal,[18,42,48,24,36,10,24,18,28]);
+      styleHeader(wsVal,9);
+      XLSX.utils.book_append_sheet(wb, wsVal, 'Validaciones');
+
+      XLSX.writeFile(wb, 'formato_nomina_mbn_input.xlsx');
+      const st = document.getElementById('bulkStatus');
+      if(st) st.innerHTML = '<div class="file-status ok">✅ Formato descargado: usa la estructura del Excel de referencia, sin datos de nómina ni Hoja1. Localidad/Zona guarda sólo el código.</div>';
+    }catch(err){
+      console.error(err);
+      alert('No se pudo generar el formato Excel input: ' + (err && err.message ? err.message : err));
+    }
+  };
+})();
+</script>
+
+
+
+<script>
+/* v24.5 — Formato Excel input con listas desplegables reales
+   - Basado en la estructura del archivo Nómina.xlsx enviado por el usuario.
+   - No incorpora datos personales ni Hoja1.
+   - Descarga un .xlsx nativo con dataValidations de Excel, por lo que las listas desplegables se conservan.
+   - La columna Localidad/Zona guarda sólo el código zona, no textos descriptivos.
+*/
+(function(){
+  const FORMATO_NOMINA_XLSX_V245 = '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';
+
+  function base64ToBlobV245(base64, mime){
+    const bin = atob(base64);
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for(let i=0;i<len;i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], {type:mime});
+  }
+
+  window.descargarFormatoNomina = function descargarFormatoNominaV245(){
+    try{
+      const blob = base64ToBlobV245(FORMATO_NOMINA_XLSX_V245, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'formato_nomina_mbn_input_desplegables.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const st = document.getElementById('bulkStatus');
+      if(st) st.innerHTML = '<div class="file-status ok">✅ Formato descargado con listas desplegables reales. Usa sólo las hojas PARAMETROS_CUPOS, Nomina input, Guia columnas y Validaciones; no incluye Hoja1 ni datos de nómina. Localidad/Zona guarda sólo el código.</div>';
+    }catch(err){
+      console.error(err);
+      alert('No se pudo descargar el formato Excel con desplegables: ' + (err && err.message ? err.message : err));
+    }
+  };
+})();
+</script>
+
 </body>
 </html>
